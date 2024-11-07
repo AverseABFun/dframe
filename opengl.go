@@ -9,18 +9,19 @@ import (
 )
 
 type OpenGL struct {
-	window        *glfw.Window
-	pixels        [][]Color
-	texture       uint32
-	width         uint32
-	height        uint32
-	shouldClose   bool
-	grabbers      []KeyGrabber
-	mouseGrabbers []MouseGrabber
-	focused       bool
+	window          *glfw.Window
+	pixels          [][]Color
+	texture         uint32
+	width           uint32
+	height          uint32
+	shouldClose     bool
+	grabbers        []KeyGrabber
+	mouseGrabbers   []MouseGrabber
+	focused         bool
+	backgroundColor Color
 }
 
-func (rr *OpenGL) InitRenderer(windowName string, width uint32, height uint32) error {
+func (rr *OpenGL) InitRenderer(windowName string, virtSize IntPoint, realSize IntPoint) error {
 	if err := glfw.Init(); err != nil {
 		return err
 	}
@@ -31,7 +32,7 @@ func (rr *OpenGL) InitRenderer(windowName string, width uint32, height uint32) e
 	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
 	glfw.WindowHint(glfw.DoubleBuffer, glfw.False)
 
-	window, err := glfw.CreateWindow(int(width)*8, int(height)*8, windowName, nil, nil)
+	window, err := glfw.CreateWindow(realSize.X, realSize.Y, windowName, nil, nil)
 	if err != nil {
 		glfw.Terminate()
 		rr.shouldClose = true
@@ -47,13 +48,13 @@ func (rr *OpenGL) InitRenderer(windowName string, width uint32, height uint32) e
 		return err
 	}
 
-	gl.Viewport(0, 0, int32(width)*8, int32(height)*8)
+	gl.Viewport(0, 0, int32(realSize.X), int32(realSize.Y))
 
 	rr.pixels = make([][]Color, 0)
-	for x := uint32(0); x < width; x++ {
-		var new = make([]Color, height)
-		for y := uint32(0); y < height; y++ {
-			new = append(new, FromRGBNoErr(0, 0, 0))
+	for x := uint32(0); x < uint32(virtSize.X); x++ {
+		var new = make([]Color, virtSize.Y)
+		for y := uint32(0); y < uint32(virtSize.Y); y++ {
+			new = append(new, FromRGBPanicIfErr(0, 0, 0))
 		}
 		rr.pixels = append(rr.pixels, new)
 	}
@@ -66,8 +67,8 @@ func (rr *OpenGL) InitRenderer(windowName string, width uint32, height uint32) e
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
 
-	rr.width = width
-	rr.height = height
+	rr.width = uint32(virtSize.X)
+	rr.height = uint32(virtSize.Y)
 	rr.shouldClose = false
 
 	window.SetKeyCallback(rr.key_callback)
@@ -78,9 +79,13 @@ func (rr *OpenGL) InitRenderer(windowName string, width uint32, height uint32) e
 	return nil
 }
 
-func (rr *OpenGL) GetSize() Point {
-	var x, y = rr.window.GetSize()
-	return Point{X: float64(x) / 4, Y: float64(y) / 4}
+func (rr *OpenGL) GetVirtSize() IntPoint {
+	return IntPoint{X: int(rr.width), Y: int(rr.height)}
+}
+
+func (rr *OpenGL) GetRealSize() IntPoint {
+	var width, height = rr.window.GetSize()
+	return IntPoint{X: width, Y: height}
 }
 
 func (rr *OpenGL) DeinitRenderer() error {
@@ -120,17 +125,22 @@ func rotate90(matrix [][]Color) [][]Color {
 	return rotated
 }
 
-func (rr *OpenGL) GetRGBArray() []uint8 {
+func (rr *OpenGL) GetRGBArray() []uint16 {
 	var rotated = rotate90(rr.pixels)
 
-	var out = make([]uint8, 0, rr.width*rr.height*3)
+	var out = make([]uint16, 0, rr.width*rr.height*3)
 	for y := 0; y < int(rr.height); y++ {
 		for x := 0; x < int(rr.width); x++ {
 			idx := rotated[y][x]
-			out = append(out, uint8(idx.R)*4, uint8(idx.G)*4, uint8(idx.B)*4)
+			out = append(out, uint16(idx.R)*5, uint16(idx.G)*6, uint16(idx.B)*5) // 565 color
 		}
 	}
 	return out
+}
+
+func (rr *OpenGL) ProcessInputs() error {
+	glfw.PollEvents()
+	return nil
 }
 
 func (rr *OpenGL) TickRenderer() {
@@ -138,14 +148,13 @@ func (rr *OpenGL) TickRenderer() {
 		rr.DeinitRenderer()
 		return
 	}
-	glfw.PollEvents()
-	gl.ClearColor(0, 0, 0, 1)
+	gl.ClearColor(float32(rr.backgroundColor.R), float32(rr.backgroundColor.G), float32(rr.backgroundColor.B), 1)
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 
 	// Bind and update the texture
 	gl.Enable(gl.TEXTURE_2D)
 	gl.BindTexture(gl.TEXTURE_2D, rr.texture)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.SRGB, int32(rr.width), int32(rr.height), 0, gl.RGB, gl.UNSIGNED_BYTE, gl.Ptr(rr.GetRGBArray()))
+	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.SRGB, int32(rr.width), int32(rr.height), 0, gl.RGB, gl.UNSIGNED_SHORT_5_6_5, gl.Ptr(rr.GetRGBArray()))
 
 	// Ensure to unbind the texture
 	gl.BindTexture(gl.TEXTURE_2D, 0)
@@ -170,7 +179,7 @@ func (rr *OpenGL) TickRenderer() {
 	gl.Flush()
 }
 
-func (rr *OpenGL) DrawBackPixel(x uint32, y uint32, color Color) error {
+func (rr *OpenGL) DrawPixel(x uint32, y uint32, color Color) error {
 	if x >= rr.width {
 		return errors.New("got x over the width of the window")
 	}
@@ -181,7 +190,8 @@ func (rr *OpenGL) DrawBackPixel(x uint32, y uint32, color Color) error {
 	return nil
 }
 
-func (rr *OpenGL) FillBack(color Color) error {
+func (rr *OpenGL) SetBack(color Color) error {
+	rr.backgroundColor = color
 	for x := uint32(0); x < rr.width; x++ {
 		for y := uint32(0); y < rr.height; y++ {
 			rr.pixels[x][y] = color
@@ -246,8 +256,9 @@ func (rr *OpenGL) PopGrabberAt(index uint32) (KeyGrabber, error) {
 	return out, nil
 }
 
-func (rr *OpenGL) PushMouseGrabber(grabber MouseGrabber) {
+func (rr *OpenGL) PushMouseGrabber(grabber MouseGrabber) (index uint32) {
 	rr.mouseGrabbers = append(rr.mouseGrabbers, grabber)
+	return uint32(len(rr.mouseGrabbers)) - 1
 }
 
 func (rr *OpenGL) PopMouseGrabber() (MouseGrabber, error) {
